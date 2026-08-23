@@ -1700,7 +1700,13 @@
             border-radius: 8px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             animation: slideIn 0.3s ease;
-            z-index: 2000;
+            /* Must outrank every overlay (admin modals, crop modal, PIN
+               lock, etc.) — the highest overlay z-index in this file is
+               5000 (PIN overlay), so the toast needs to sit above that or
+               it renders invisibly behind whichever modal happens to be
+               open when showToast() is called (e.g. after saving a
+               product from the product form, which sits at 4000). */
+            z-index: 6000;
         }
 
         @keyframes slideIn {
@@ -4215,6 +4221,14 @@
             return div.innerHTML;
         }
 
+        // Same idea as escapeHtml, but safe to interpolate inside a single-quoted
+        // HTML attribute (e.g. onclick="fn('...')"). escapeHtml alone isn't enough
+        // there: it neutralizes < > & " but leaves a raw ' that could otherwise
+        // close the attribute early and inject arbitrary JS/HTML.
+        function escapeAttr(str) {
+            return escapeHtml(str).replace(/'/g, '&#39;');
+        }
+
         // Demo/new-arrival videos shown on the storefront "Vidéos" section.
         // Separate from products: these are standalone channel uploads
         // (e.g. "nouveau arrivage" recap) not tied to a single product.
@@ -5276,13 +5290,14 @@
                 return;
             }
 
-            const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-            const orderItems = cart.map(item => ({ id: item.id, name: item.name, price: item.price, quantity: item.quantity }));
             const cartSnapshot = cart.map(item => ({ ...item }));
 
             try {
                 const { db, collection, doc, runTransaction, serverTimestamp } = fb;
 
+                // Price + stock are re-read live inside the transaction (see below) —
+                // the client-side cart is only used for quantities and to know which
+                // product docs to fetch, never for the price actually charged.
                 await runTransaction(db, async (tx) => {
                     const productRefs = cartSnapshot.map(item => doc(db, 'products', String(item.id)));
                     const productSnaps = await Promise.all(productRefs.map(ref => tx.get(ref)));
@@ -5301,6 +5316,14 @@
                             throw new Error(`STOCK_INSUFFISANT:${item.name}`);
                         }
                     }
+
+                    const orderItems = cartSnapshot.map((item, i) => ({
+                        id: item.id,
+                        name: liveProducts[i].data.name,
+                        price: liveProducts[i].data.price,
+                        quantity: item.quantity
+                    }));
+                    const total = orderItems.reduce((sum, it) => sum + (it.price * it.quantity), 0);
 
                     const orderRef = doc(collection(db, 'orders'));
                     tx.set(orderRef, {
@@ -5329,7 +5352,7 @@
                         const movementRef = doc(collection(db, 'stockMovements'));
                         tx.set(movementRef, {
                             productId: item.id,
-                            productName: item.name,
+                            productName: product.name,
                             type: 'vente',
                             change: -item.quantity,
                             stockAfter: newStock,
@@ -5468,17 +5491,25 @@
             submitBtn.disabled = true;
             submitBtn.textContent = 'Envoi en cours...';
 
-            const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-            const orderItems = cart.map(item => ({ id: item.id, name: item.name, price: item.price, quantity: item.quantity }));
             const cartSnapshot = cart.map(item => ({ ...item }));
+
+            // Populated inside the transaction from the live product docs (see
+            // below) so the confirmation recap always reflects what was actually
+            // charged, never the client-side cart.
+            let orderItems = null;
+            let total = null;
 
             try {
                 const { db, collection, doc, runTransaction, serverTimestamp } = fb;
 
-                // Atomic: re-reads live stock, writes the order, decrements stock and
-                // logs each movement all inside a single transaction. Firestore aborts
-                // and retries automatically if another client writes the same product
-                // concurrently, so two simultaneous orders can never oversell the same item.
+                // Atomic: re-reads live stock AND price, writes the order, decrements
+                // stock and logs each movement all inside a single transaction.
+                // Firestore aborts and retries automatically if another client writes
+                // the same product concurrently, so two simultaneous orders can never
+                // oversell the same item. Pricing the order from liveProducts (not the
+                // client-side cart) also means a tampered/stale local price can never
+                // make it into the stored order or the stock movement log — only the
+                // catalog price actually charged on Firestore's side ever gets written.
                 await runTransaction(db, async (tx) => {
                     const productRefs = cartSnapshot.map(item => doc(db, 'products', String(item.id)));
                     const productSnaps = await Promise.all(productRefs.map(ref => tx.get(ref)));
@@ -5498,6 +5529,17 @@
                             throw new Error(`STOCK_INSUFFISANT:${item.name}`);
                         }
                     }
+
+                    // Price + name always come from the live product doc, never the
+                    // client's cart — only quantity (the customer's actual choice) is
+                    // taken from cartSnapshot.
+                    orderItems = cartSnapshot.map((item, i) => ({
+                        id: item.id,
+                        name: liveProducts[i].data.name,
+                        price: liveProducts[i].data.price,
+                        quantity: item.quantity
+                    }));
+                    total = orderItems.reduce((sum, it) => sum + (it.price * it.quantity), 0);
 
                     const orderRef = doc(collection(db, 'orders'));
                     tx.set(orderRef, {
@@ -5524,7 +5566,7 @@
                         const movementRef = doc(collection(db, 'stockMovements'));
                         tx.set(movementRef, {
                             productId: item.id,
-                            productName: item.name,
+                            productName: product.name,
                             type: 'vente',
                             change: -item.quantity,
                             stockAfter: newStock,
@@ -6366,14 +6408,14 @@
 
             tbody.innerHTML = customers.map(c => `
                 <tr>
-                    <td>${c.name}</td>
-                    <td>${c.phone}</td>
+                    <td>${escapeHtml(c.name)}</td>
+                    <td>${escapeHtml(c.phone)}</td>
                     <td>${c.orderCount}</td>
                     <td>${c.totalSpent.toLocaleString('fr-FR')} GNF</td>
                     <td>${c.balanceDue > 0 ? `<span class="stock-badge stock-out">${c.balanceDue.toLocaleString('fr-FR')} GNF</span>` : '—'}</td>
                     <td>${c.lastOrderDate ? c.lastOrderDate.toLocaleDateString('fr-FR') : '—'}</td>
                     <td>
-                        <button class="admin-btn secondary small" onclick="openCustomerDetail('${c.phone}')">Historique</button>
+                        <button class="admin-btn secondary small" onclick="openCustomerDetail('${escapeAttr(c.phone)}')">Historique</button>
                     </td>
                 </tr>
             `).join('');
@@ -6400,10 +6442,10 @@
                             ${sortedOrders.map(o => `
                                 <tr>
                                     <td>${o.date.toLocaleDateString('fr-FR')}</td>
-                                    <td>${(o.items || []).map(it => `${it.name} ×${it.quantity}`).join(', ')}</td>
+                                    <td>${(o.items || []).map(it => `${escapeHtml(it.name)} ×${it.quantity}`).join(', ')}</td>
                                     <td>${(o.total || 0).toLocaleString('fr-FR')} GNF</td>
                                     <td>${paymentMethodLabels[o.paymentMethod] || '—'}${o.paymentStatus === 'due' ? ' <span class="stock-badge stock-out">Dû</span>' : ''}</td>
-                                    <td>${o.paymentStatus === 'due' ? `<button class="admin-btn small" onclick="markOrderPaid('${o.firestoreId}', '${phone}')">Marquer payé</button>` : '—'}</td>
+                                    <td>${o.paymentStatus === 'due' ? `<button class="admin-btn small" onclick="markOrderPaid('${o.firestoreId}', '${escapeAttr(phone)}')">Marquer payé</button>` : '—'}</td>
                                 </tr>
                             `).join('')}
                         </tbody>
@@ -7442,10 +7484,21 @@
                 cropPointerDown(t.clientX, t.clientY);
             }, { passive: true });
             wrap.addEventListener('touchmove', (e) => {
+                // Must NOT be passive: without preventDefault() here, the page
+                // scrolls/bounces under the finger while the admin is trying to
+                // pan the crop frame, which on mobile made the crop step feel
+                // broken (image barely moves, page jumps instead) — this is
+                // almost certainly the "upload bug" being reported on phones.
+                e.preventDefault();
                 const t = e.touches[0];
                 cropPointerMove(t.clientX, t.clientY);
-            }, { passive: true });
+            }, { passive: false });
             wrap.addEventListener('touchend', cropPointerUp);
+            // A touch can be interrupted (incoming call, notification, OS
+            // gesture) without ever firing touchend — without this, dragging
+            // stays stuck "true" and the next tap anywhere keeps panning the
+            // image unexpectedly.
+            wrap.addEventListener('touchcancel', cropPointerUp);
 
             slider.addEventListener('input', () => {
                 if (!cropModalState.img) return;
@@ -7875,12 +7928,12 @@
                             <tr>
                                 <td>${o.date.toLocaleDateString('fr-FR')} ${o.date.toLocaleTimeString('fr-FR', {hour: '2-digit', minute: '2-digit'})}</td>
                                 <td>
-                                    <div style="font-weight:700;">${o.customerName || '—'}</div>
-                                    <div style="font-size:0.78rem; color:var(--dash-text-dim); max-width:180px;">${o.customerAddress || ''}</div>
-                                    ${o.note ? `<div style="font-size:0.78rem; color:var(--dash-text-dim); font-style:italic;">Note: ${o.note}</div>` : ''}
+                                    <div style="font-weight:700;">${escapeHtml(o.customerName || '—')}</div>
+                                    <div style="font-size:0.78rem; color:var(--dash-text-dim); max-width:180px;">${escapeHtml(o.customerAddress || '')}</div>
+                                    ${o.note ? `<div style="font-size:0.78rem; color:var(--dash-text-dim); font-style:italic;">Note: ${escapeHtml(o.note)}</div>` : ''}
                                 </td>
-                                <td>${o.customerPhone || '—'}</td>
-                                <td>${o.items.map(i => `${i.name} x${i.quantity}`).join(', ')}</td>
+                                <td>${escapeHtml(o.customerPhone || '—')}</td>
+                                <td>${o.items.map(i => `${escapeHtml(i.name)} x${i.quantity}`).join(', ')}</td>
                                 <td>${o.total.toLocaleString('fr-FR')} GNF</td>
                                 <td>
                                     <select onchange="updateOrderStatus('${o.firestoreId}', this.value)" class="order-status status-${o.status}" style="border:none; cursor:pointer;">
@@ -8205,14 +8258,14 @@
                             const isDue = o.paymentStatus === 'due';
                             return `
                                 <tr>
-                                    <td style="font-weight:700;">${inv.number}</td>
+                                    <td style="font-weight:700;">${escapeHtml(inv.number)}</td>
                                     <td>${o.date.toLocaleDateString('fr-FR')}</td>
-                                    <td>${o.customerName || '—'}</td>
+                                    <td>${escapeHtml(o.customerName || '—')}</td>
                                     <td>${(o.total || 0).toLocaleString('fr-FR')} GNF</td>
                                     <td><span class="stock-badge ${isDue ? 'stock-out' : 'stock-ok'}">${isDue ? 'Impayée' : 'Payée'}</span></td>
                                     <td>
                                         <button class="admin-btn secondary small" onclick="openInvoiceDetail('${o.firestoreId}')">Voir</button>
-                                        ${isDue ? `<button class="admin-btn small" onclick="markOrderPaid('${o.firestoreId}', '${(o.customerPhone || '').trim()}'); renderAdminInvoices();">Marquer payée</button>` : ''}
+                                        ${isDue ? `<button class="admin-btn small" onclick="markOrderPaid('${o.firestoreId}', '${escapeAttr((o.customerPhone || '').trim())}'); renderAdminInvoices();">Marquer payée</button>` : ''}
                                     </td>
                                 </tr>
                             `;
@@ -8249,9 +8302,9 @@
                     </div>
                     <div style="margin-bottom:1rem; padding:0.8rem; background:var(--dash-surface); border-radius:8px; border:1px solid var(--dash-border);">
                         <div style="font-weight:700;">Facturé à</div>
-                        <div>${o.customerName || '—'}</div>
-                        <div style="color:var(--dash-text-dim); font-size:0.85rem;">${o.customerPhone || ''}</div>
-                        <div style="color:var(--dash-text-dim); font-size:0.85rem;">${o.customerAddress || ''}</div>
+                        <div>${escapeHtml(o.customerName || '—')}</div>
+                        <div style="color:var(--dash-text-dim); font-size:0.85rem;">${escapeHtml(o.customerPhone || '')}</div>
+                        <div style="color:var(--dash-text-dim); font-size:0.85rem;">${escapeHtml(o.customerAddress || '')}</div>
                         <div style="font-size:0.85rem; margin-top:0.3rem;">Mode de paiement : ${paymentMethodLabels[o.paymentMethod] || '—'}</div>
                     </div>
                     <table class="admin-table">
@@ -8259,7 +8312,7 @@
                         <tbody>
                             ${(o.items || []).map(it => `
                                 <tr>
-                                    <td>${it.name}</td>
+                                    <td>${escapeHtml(it.name)}</td>
                                     <td>${it.quantity}</td>
                                     <td>${it.price.toLocaleString('fr-FR')}</td>
                                     <td>${(it.price * it.quantity).toLocaleString('fr-FR')}</td>
@@ -8503,9 +8556,9 @@
                         ${filtered.map(o => `
                             <tr>
                                 <td>${o.date.toLocaleDateString('fr-FR')}</td>
-                                <td>${o.customerName || '—'}</td>
-                                <td style="max-width:200px;">${o.customerAddress || '—'}</td>
-                                <td>${o.customerPhone || '—'}</td>
+                                <td>${escapeHtml(o.customerName || '—')}</td>
+                                <td style="max-width:200px;">${escapeHtml(o.customerAddress || '—')}</td>
+                                <td>${escapeHtml(o.customerPhone || '—')}</td>
                                 <td>${(o.total || 0).toLocaleString('fr-FR')} GNF</td>
                                 <td>
                                     <select onchange="updateDeliveryStatus('${o.firestoreId}', this.value)" class="order-status" style="border:none; cursor:pointer;">
@@ -8600,14 +8653,14 @@
 
             tbody.innerHTML = list.map(c => `
                 <tr>
-                    <td>${c.name}</td>
-                    <td>${c.phone}</td>
+                    <td>${escapeHtml(c.name)}</td>
+                    <td>${escapeHtml(c.phone)}</td>
                     <td>${c.totalSpent.toLocaleString('fr-FR')} GNF</td>
                     <td>${c.pointsEarned}</td>
                     <td>${c.pointsUsed}</td>
                     <td style="font-weight:700; color:var(--dash-orange);">${c.pointsBalance}</td>
                     <td>
-                        <button class="admin-btn small" ${c.pointsBalance <= 0 ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''} onclick="redeemLoyaltyPoints('${c.phone}', '${c.name.replace(/'/g, "\\'")}', ${c.pointsBalance})">Utiliser des points</button>
+                        <button class="admin-btn small" ${c.pointsBalance <= 0 ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''} onclick="redeemLoyaltyPoints('${escapeAttr(c.phone)}', '${escapeAttr(c.name)}', ${c.pointsBalance})">Utiliser des points</button>
                     </td>
                 </tr>
             `).join('');
@@ -8804,7 +8857,7 @@
                 ? `<tr><td colspan="3"><div class="admin-empty"><div class="admin-empty-icon">🧑‍🤝‍🧑</div><p>Aucun client pour le moment</p></div></td></tr>`
                 : topCustomers.map(c => `
                     <tr>
-                        <td>${c.name}</td>
+                        <td>${escapeHtml(c.name)}</td>
                         <td>${c.orderCount}</td>
                         <td>${c.totalSpent.toLocaleString('fr-FR')} GNF</td>
                     </tr>
