@@ -7298,7 +7298,16 @@
         // original proportions. The crop rectangle itself now comes from
         // the crop modal (user-chosen pan/zoom) instead of always being the
         // auto-centered square.
-        function canvasToJpeg(img, maxDim, quality, cropRect) {
+        function canvasToJpeg(canvasOrImg, maxDim, quality, cropRect) {
+            // Accepts either a source <img> (draws + resizes it onto a fresh
+            // canvas) or an existing canvas (just re-encodes it at a new
+            // quality — used by the fast path below to avoid redrawing the
+            // image on every quality attempt).
+            if (canvasOrImg instanceof HTMLCanvasElement) {
+                return canvasOrImg.toDataURL('image/jpeg', quality);
+            }
+
+            const img = canvasOrImg;
             const { width: srcW, height: srcH } = img;
             let side, sx, sy;
             if (cropRect) {
@@ -7325,31 +7334,64 @@
             return Math.round((base64.length * 3) / 4);
         }
 
+        // Builds the resized canvas ONCE for a given maxDim, then only
+        // re-encodes (toDataURL) at different quality levels on that same
+        // canvas. drawImage (resizing the source photo) is the expensive
+        // step — a phone photo can be 4000px+ per side — so redoing it on
+        // every quality attempt (the old behavior) is what made compression
+        // freeze the tab for a long time on large uploads. Re-encoding an
+        // already-sized canvas at a new quality is comparatively cheap.
+        function buildResizedCanvas(img, maxDim, cropRect) {
+            const { width: srcW, height: srcH } = img;
+            let side, sx, sy;
+            if (cropRect) {
+                ({ side, sx, sy } = cropRect);
+            } else {
+                side = Math.min(srcW, srcH);
+                sx = Math.round((srcW - side) / 2);
+                sy = Math.round((srcH - side) / 2);
+            }
+            const outSize = Math.min(maxDim, Math.round(side));
+            const canvas = document.createElement('canvas');
+            canvas.width = outSize;
+            canvas.height = outSize;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, outSize, outSize);
+            ctx.drawImage(img, sx, sy, side, side, 0, 0, outSize, outSize);
+            return canvas;
+        }
+
         // Iteratively reduces quality, then dimensions, until the encoded
         // JPEG is at or below the target size. Starts at a large dimension and
         // high quality, only stepping down as far as needed — Firestore's real
         // limit is 1 MiB per document, so targets well under that (e.g. 150-300KB)
         // still leave a lot more headroom than the old ~5KB target, which forced
         // the image down to ~100px/10% quality and looked heavily degraded.
+        //
+        // Performance: the source image is resized onto a canvas only ONCE
+        // per dimension step (buildResizedCanvas), then re-encoded at a
+        // handful of quality levels on that same canvas. This keeps the
+        // whole pass fast even for large phone photos, instead of redrawing
+        // the full-resolution source image on every quality attempt.
         function compressImageToTarget(img, targetBytes = 200 * 1024, cropRect) {
             const dims = [1600, 1200, 1000, 800, 600, 400, 300];
+            const qualities = [0.85, 0.7, 0.55, 0.4];
             let best = null;
 
             for (const maxDim of dims) {
-                let quality = 0.92;
-                let dataUrl = canvasToJpeg(img, maxDim, quality, cropRect);
+                const canvas = buildResizedCanvas(img, maxDim, cropRect);
 
-                while (dataUrlSizeBytes(dataUrl) > targetBytes && quality > 0.4) {
-                    quality -= 0.07;
-                    dataUrl = canvasToJpeg(img, maxDim, quality, cropRect);
-                }
+                for (const quality of qualities) {
+                    const dataUrl = canvasToJpeg(canvas, maxDim, quality);
+                    const size = dataUrlSizeBytes(dataUrl);
 
-                if (!best || dataUrlSizeBytes(dataUrl) < dataUrlSizeBytes(best)) {
-                    best = dataUrl;
-                }
-
-                if (dataUrlSizeBytes(dataUrl) <= targetBytes) {
-                    return dataUrl;
+                    if (!best || size < dataUrlSizeBytes(best)) {
+                        best = dataUrl;
+                    }
+                    if (size <= targetBytes) {
+                        return dataUrl;
+                    }
                 }
             }
 
@@ -7562,6 +7604,14 @@
             try {
                 const img = await loadImageFromFile(file);
                 const cropRect = await openCropModal(img);
+
+                // compressImageToTarget is synchronous and can take a moment
+                // on a large source photo, so show visible progress first —
+                // otherwise the admin has no feedback while it runs and it
+                // can look like the click did nothing.
+                showToast('Compression de la photo...');
+                await new Promise(requestAnimationFrame); // let the toast paint before the heavy work
+
                 const compressed = compressImageToTarget(img, 200 * 1024, cropRect);
                 document.getElementById('pf-image').value = compressed;
                 showProductPhotoPreview(compressed);
