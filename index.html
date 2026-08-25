@@ -3783,7 +3783,7 @@
                 <div class="form-group">
                     <label>Photo du produit</label>
                     <input type="file" id="pf-photo-input" accept="image/*" onchange="handleProductPhotoSelect(event)">
-                    <div id="pf-photo-preview-wrap" style="display:none; margin-top:8px; display:flex; align-items:center; gap:10px;">
+                    <div id="pf-photo-preview-wrap" style="display:none; margin-top:8px; align-items:center; gap:10px;">
                         <img id="pf-photo-preview" src="" alt="Aperçu" style="width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid #ddd;">
                         <div style="font-size:0.8rem; color:var(--text-muted,#666);">
                             <div id="pf-photo-size">-</div>
@@ -6873,7 +6873,7 @@
                 // Smaller target than product photos since these are shown as a
                 // small circular avatar and several may share the same settings
                 // document — but still large enough to avoid visible degradation.
-                const compressed = compressImageToTarget(img, 60 * 1024, cropRect);
+                const compressed = await compressImageToTarget(img, 60 * 1024, cropRect);
                 if (teamMembersDraft[index]) {
                     teamMembersDraft[index].photo = compressed;
                     const preview = document.getElementById(`team-photo-preview-${index}`);
@@ -7374,12 +7374,21 @@
         // handful of quality levels on that same canvas. This keeps the
         // whole pass fast even for large phone photos, instead of redrawing
         // the full-resolution source image on every quality attempt.
-        function compressImageToTarget(img, targetBytes = 200 * 1024, cropRect) {
+        async function compressImageToTarget(img, targetBytes = 200 * 1024, cropRect) {
             const dims = [1600, 1200, 1000, 800, 600, 400, 300];
             const qualities = [0.85, 0.7, 0.55, 0.4];
             let best = null;
 
             for (const maxDim of dims) {
+                // Yield to the browser before each dimension step (the
+                // expensive drawImage/resize) so the tab can repaint and
+                // process input instead of freezing solid on a large phone
+                // photo. Without this, the whole loop below ran as one
+                // uninterrupted synchronous block, which could look like a
+                // silent failure on big source images (toast appears, then
+                // nothing — the page just never got a chance to update).
+                await new Promise(requestAnimationFrame);
+
                 const canvas = buildResizedCanvas(img, maxDim, cropRect);
 
                 for (const quality of qualities) {
@@ -7605,14 +7614,17 @@
                 const img = await loadImageFromFile(file);
                 const cropRect = await openCropModal(img);
 
-                // compressImageToTarget is synchronous and can take a moment
-                // on a large source photo, so show visible progress first —
-                // otherwise the admin has no feedback while it runs and it
-                // can look like the click did nothing.
+                // compressImageToTarget can take a moment on a large source
+                // photo, so show visible progress first — otherwise the
+                // admin has no feedback while it runs and it can look like
+                // the click did nothing. The function itself now yields
+                // between steps (see its definition) instead of running as
+                // one long blocking call, so the toast/preview reliably show
+                // up even on big phone photos.
                 showToast('Compression de la photo...');
                 await new Promise(requestAnimationFrame); // let the toast paint before the heavy work
 
-                const compressed = compressImageToTarget(img, 200 * 1024, cropRect);
+                const compressed = await compressImageToTarget(img, 200 * 1024, cropRect);
                 document.getElementById('pf-image').value = compressed;
                 showProductPhotoPreview(compressed);
             } catch (err) {
