@@ -3665,7 +3665,7 @@
                         </div>
                     </div>
                     <input type="hidden" id="pf-image">
-                    <small style="color:var(--text-muted,#666);">Recadrez la photo dans la fenêtre qui s'ouvre, puis elle est compressée automatiquement (qualité préservée, ~200 Ko max) avant l'enregistrement.</small>
+                    <small style="color:var(--text-muted,#666);">Choisissez une photo déjà compressée (500 Ko maximum). Les photos plus lourdes seront refusées.</small>
                 </div>
                 <div class="form-group">
                     <label>Vidéo YouTube (optionnel)</label>
@@ -7154,9 +7154,10 @@
         }
 
         // Max size for a photo stored inline in the Firestore document.
-        // Firestore's hard limit is 1 MiB per document; this leaves headroom
-        // for the rest of the product's fields (name, price, description...).
-        const MAX_INLINE_PHOTO_BYTES = 900 * 1024;
+        // Firestore's hard limit is 1 MiB per document; 500KB keeps the
+        // document reasonably light while still leaving headroom for the
+        // rest of the product's fields (name, price, description...).
+        const MAX_INLINE_PHOTO_BYTES = 500 * 1024;
 
         async function handleProductPhotoSelect(event) {
             const file = event.target.files && event.target.files[0];
