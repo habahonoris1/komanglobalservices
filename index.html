@@ -82,6 +82,66 @@
             background: #2e7d32;
         }
 
+        /* Install-app prompt banner, shown at the bottom of the screen once
+           the browser signals the site is installable (or, on iOS Safari
+           which never fires that event, after a short delay so iOS users
+           still get instructions). Sits below everything else that's fixed
+           to the bottom (e.g. a bottom nav) but above normal page content. */
+        .install-app-banner {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            background: var(--primary-blue, #0066CC);
+            color: white;
+            font-size: 0.85rem;
+            padding: 0.75rem 1rem;
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 2500;
+            box-shadow: 0 -4px 12px rgba(0,0,0,0.15);
+        }
+
+        .install-app-banner.active {
+            display: flex;
+        }
+
+        .install-app-banner-text {
+            flex: 1;
+            line-height: 1.3;
+        }
+
+        .install-app-banner-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        .install-app-banner-btn {
+            background: white;
+            color: var(--primary-blue, #0066CC);
+            border: none;
+            border-radius: 6px;
+            padding: 0.5rem 0.9rem;
+            font-weight: 700;
+            font-size: 0.85rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .install-app-banner-dismiss {
+            background: transparent;
+            border: none;
+            color: white;
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 0.25rem 0.4rem;
+            opacity: 0.85;
+        }
+
         .header-content {
             max-width: 1400px;
             margin: 0 auto;
@@ -2651,6 +2711,7 @@
             <button class="side-menu-link" onclick="navigateStorefront('videos')">🎬 Vidéos</button>
             <button class="side-menu-link" onclick="navigateStorefront('localisation')">📍 Localisation</button>
             <button class="side-menu-link" onclick="navigateStorefront('contact')">📞 Contact</button>
+            <button class="side-menu-link" id="installAppMenuBtn" onclick="triggerAppInstall()" style="display:none;">📲 Installer l'application</button>
             <div class="side-menu-section-label">Catégories</div>
             <div id="sideMenuCategories"></div>
             <div class="side-menu-footer">
@@ -2664,6 +2725,15 @@
     <div id="offlineBanner" class="offline-banner">
         <span id="offlineBannerIcon">📡</span>
         <span id="offlineBannerText">Hors-ligne — les ventes sont enregistrées localement et seront synchronisées au retour du réseau</span>
+    </div>
+
+    <!-- Install-app prompt banner -->
+    <div id="installAppBanner" class="install-app-banner">
+        <span class="install-app-banner-text" id="installAppBannerText">📲 Installez l'application Koman.GS pour un accès plus rapide, même hors connexion.</span>
+        <div class="install-app-banner-actions">
+            <button class="install-app-banner-btn" id="installAppBannerBtn" onclick="triggerAppInstall()">Installer</button>
+            <button class="install-app-banner-dismiss" onclick="dismissInstallAppBanner()" aria-label="Fermer">✕</button>
+        </div>
     </div>
 
     <!-- Main Content -->
@@ -3841,6 +3911,102 @@
             });
         }
 
+        // ===== INSTALL APP (PWA) =====
+        // Chrome/Edge/Android fire 'beforeinstallprompt' when the site meets
+        // installability criteria (manifest + service worker + HTTPS). We
+        // stash that event and trigger it later from our own button, since
+        // the browser's native mini-infobar is easy to miss or dismiss by
+        // accident. iOS Safari never fires this event — there is no
+        // programmatic install API there — so on iOS we instead show the
+        // banner with manual "Share > Add to Home Screen" instructions.
+        let deferredInstallPrompt = null;
+        const INSTALL_DISMISS_KEY = 'installBannerDismissedAt';
+        const INSTALL_DISMISS_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+        function isRunningAsInstalledApp() {
+            return window.matchMedia('(display-mode: standalone)').matches
+                || window.navigator.standalone === true; // iOS Safari flag
+        }
+
+        function isIOSSafari() {
+            const ua = window.navigator.userAgent;
+            const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+            const isSafari = /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
+            return isIOS && isSafari;
+        }
+
+        function wasInstallBannerRecentlyDismissed() {
+            const raw = localStorage.getItem(INSTALL_DISMISS_KEY);
+            if (!raw) return false;
+            return (Date.now() - Number(raw)) < INSTALL_DISMISS_COOLDOWN_MS;
+        }
+
+        function dismissInstallAppBanner() {
+            localStorage.setItem(INSTALL_DISMISS_KEY, String(Date.now()));
+            document.getElementById('installAppBanner').classList.remove('active');
+        }
+
+        function showInstallAppBanner() {
+            if (wasInstallBannerRecentlyDismissed()) return;
+            document.getElementById('installAppBanner').classList.add('active');
+        }
+
+        function updateInstallMenuButtonVisibility() {
+            const menuBtn = document.getElementById('installAppMenuBtn');
+            if (!menuBtn) return;
+            const installable = !!deferredInstallPrompt || isIOSSafari();
+            menuBtn.style.display = (installable && !isRunningAsInstalledApp()) ? 'block' : 'none';
+        }
+
+        async function triggerAppInstall() {
+            if (deferredInstallPrompt) {
+                deferredInstallPrompt.prompt();
+                const { outcome } = await deferredInstallPrompt.userChoice;
+                deferredInstallPrompt = null;
+                updateInstallMenuButtonVisibility();
+                document.getElementById('installAppBanner').classList.remove('active');
+                if (outcome === 'accepted') {
+                    showToast('Application installée !');
+                }
+                return;
+            }
+            if (isIOSSafari()) {
+                showToast("Sur iPhone/iPad : appuyez sur 📤 Partager puis \"Sur l'écran d'accueil\"");
+                return;
+            }
+            showToast("L'installation n'est pas disponible sur ce navigateur");
+        }
+
+        if (!isRunningAsInstalledApp()) {
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault(); // stop Chrome's own mini-infobar
+                deferredInstallPrompt = e;
+                updateInstallMenuButtonVisibility();
+                showInstallAppBanner();
+            });
+
+            window.addEventListener('appinstalled', () => {
+                deferredInstallPrompt = null;
+                updateInstallMenuButtonVisibility();
+                document.getElementById('installAppBanner').classList.remove('active');
+            });
+
+            // iOS never fires beforeinstallprompt, so show the manual-install
+            // banner after a short delay if the visitor hasn't dismissed it
+            // recently and hasn't already installed the app.
+            if (isIOSSafari()) {
+                window.addEventListener('load', () => {
+                    setTimeout(() => {
+                        updateInstallMenuButtonVisibility();
+                        showInstallAppBanner();
+                    }, 4000);
+                });
+            }
+        }
+
+        window.triggerAppInstall = triggerAppInstall;
+        window.dismissInstallAppBanner = dismissInstallAppBanner;
+
         // ===== OFFLINE / SYNC STATUS BANNER =====
         // Shows a banner when the browser has no network, or when Firestore is
         // still serving reads from its local cache (i.e. pending writes may not
@@ -4431,7 +4597,7 @@
         // Returns HTML for a product's visual (real photo if available, else emoji icon)
         function productImageHtml(product, className) {
             if (product.image) {
-                return `<img src="${product.image}" alt="${product.name}" class="${className}" style="width:100%;height:100%;object-fit:cover;">`;
+                return `<img src="${product.image}" alt="${product.name}" class="${className}" style="width:100%;height:100%;object-fit:contain;">`;
             }
             return product.icon;
         }
