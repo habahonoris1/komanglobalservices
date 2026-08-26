@@ -321,104 +321,6 @@
             justify-content: center;
         }
 
-        /* Photo crop modal */
-        .crop-modal-overlay {
-            display: none;
-            position: fixed;
-            inset: 0;
-            background: rgba(0,0,0,0.7);
-            z-index: 4000;
-            align-items: center;
-            justify-content: center;
-            padding: 1rem;
-        }
-
-        .crop-modal-overlay.active {
-            display: flex;
-        }
-
-        .crop-modal {
-            background: white;
-            border-radius: 16px;
-            width: 100%;
-            max-width: 480px;
-            max-height: 92vh;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
-
-        .crop-modal-header {
-            padding: 1rem 1.2rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid var(--border-gray, #e0e0e0);
-        }
-
-        .crop-modal-header h3 {
-            font-size: 1.05rem;
-            font-weight: 700;
-        }
-
-        .crop-canvas-wrap {
-            position: relative;
-            width: 100%;
-            aspect-ratio: 1 / 1;
-            background: #1a1a1a repeating-conic-gradient(#2a2a2a 0% 25%, #1a1a1a 0% 50%) 50% / 20px 20px;
-            overflow: hidden;
-            touch-action: none;
-            cursor: grab;
-        }
-
-        .crop-canvas-wrap:active {
-            cursor: grabbing;
-        }
-
-        .crop-canvas-wrap canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-        }
-
-        .crop-controls {
-            padding: 1rem 1.2rem;
-            display: flex;
-            flex-direction: column;
-            gap: 0.6rem;
-        }
-
-        .crop-zoom-row {
-            display: flex;
-            align-items: center;
-            gap: 0.7rem;
-        }
-
-        .crop-zoom-row span {
-            font-size: 1.1rem;
-        }
-
-        .crop-zoom-row input[type="range"] {
-            flex: 1;
-        }
-
-        .crop-hint {
-            font-size: 0.8rem;
-            color: var(--text-light, #666);
-            text-align: center;
-        }
-
-        .crop-modal-footer {
-            padding: 1rem 1.2rem;
-            display: flex;
-            gap: 0.6rem;
-            border-top: 1px solid var(--border-gray, #e0e0e0);
-        }
-
-        .crop-modal-footer button {
-            flex: 1;
-        }
-
         .share-menu-overlay.active {
             display: flex;
         }
@@ -1700,7 +1602,7 @@
             border-radius: 8px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             animation: slideIn 0.3s ease;
-            /* Must outrank every overlay (admin modals, crop modal, PIN
+            /* Must outrank every overlay (admin modals, PIN
                lock, etc.) — the highest overlay z-index in this file is
                5000 (PIN overlay), so the toast needs to sit above that or
                it renders invisibly behind whichever modal happens to be
@@ -2922,34 +2824,6 @@
                     <span class="share-option-icon" style="background:#666;">🔗</span>
                     Copier le lien
                 </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Photo crop modal: lets the admin pan/zoom the uploaded photo inside
-         a fixed square frame before it goes through compression. Reuses the
-         same square-crop convention as the old center-crop, but now the
-         admin chooses which part of the photo lands in the square instead
-         of it always being auto-centered. -->
-    <div class="crop-modal-overlay" id="cropModalOverlay">
-        <div class="crop-modal">
-            <div class="crop-modal-header">
-                <h3>Recadrer la photo</h3>
-                <button class="modal-close" style="position:static;" onclick="cancelCropModal()">✕</button>
-            </div>
-            <div class="crop-canvas-wrap" id="cropCanvasWrap">
-                <canvas id="cropCanvas"></canvas>
-            </div>
-            <div class="crop-controls">
-                <div class="crop-zoom-row">
-                    <span>🔍</span>
-                    <input type="range" id="cropZoomSlider" min="100" max="400" value="100">
-                </div>
-                <div class="crop-hint">Glissez pour déplacer, ajustez le zoom pour cadrer</div>
-            </div>
-            <div class="crop-modal-footer">
-                <button type="button" class="admin-btn secondary" onclick="cancelCropModal()">Annuler</button>
-                <button type="button" class="admin-btn" onclick="confirmCropModal()">Valider</button>
             </div>
         </div>
     </div>
@@ -6859,6 +6733,12 @@
             teamMembersDraft[index][field] = value;
         }
 
+        // Team member photos live inline in a shared settings document
+        // alongside every other member's photo, so each one needs a tighter
+        // budget than a product photo to avoid pushing the whole document
+        // over Firestore's 1 MiB limit.
+        const MAX_INLINE_TEAM_PHOTO_BYTES = 150 * 1024;
+
         async function handleTeamMemberPhotoSelect(event, index) {
             const file = event.target.files && event.target.files[0];
             if (!file) return;
@@ -6867,24 +6747,25 @@
                 event.target.value = '';
                 return;
             }
+            if (file.size > MAX_INLINE_TEAM_PHOTO_BYTES) {
+                showToast(`Cette photo est trop lourde (${Math.round(file.size / 1024)} Ko). Merci de la compresser avant de l'envoyer (max ~${Math.round(MAX_INLINE_TEAM_PHOTO_BYTES / 1024)} Ko).`);
+                event.target.value = '';
+                return;
+            }
             try {
-                const img = await loadImageFromFile(file);
-                const cropRect = await openCropModal(img);
-                // Smaller target than product photos since these are shown as a
-                // small circular avatar and several may share the same settings
-                // document — but still large enough to avoid visible degradation.
-                const compressed = await compressImageToTarget(img, 60 * 1024, cropRect);
+                const reader = new FileReader();
+                const dataUrl = await new Promise((resolve, reject) => {
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = () => reject(reader.error);
+                    reader.readAsDataURL(file);
+                });
                 if (teamMembersDraft[index]) {
-                    teamMembersDraft[index].photo = compressed;
+                    teamMembersDraft[index].photo = dataUrl;
                     const preview = document.getElementById(`team-photo-preview-${index}`);
-                    if (preview) { preview.src = compressed; preview.style.display = 'block'; }
+                    if (preview) { preview.src = dataUrl; preview.style.display = 'block'; }
                 }
             } catch (err) {
-                if (err && err.message === 'crop-cancelled') {
-                    event.target.value = '';
-                    return;
-                }
-                console.error('Erreur compression photo employé:', err);
+                console.error('Erreur lecture photo employé:', err);
                 showToast('Impossible de traiter cette image');
             }
         }
@@ -7252,7 +7133,7 @@
             document.getElementById('productFormOverlay').classList.remove('active');
         }
 
-        // ---- Product photo upload + automatic compression (~5KB target) ----
+        // ---- Product photo upload (no auto-crop/compression: admin sends an already-sized file) ----
 
         function showProductPhotoPreview(dataUrl) {
             const wrap = document.getElementById('pf-photo-preview-wrap');
@@ -7272,333 +7153,10 @@
             document.getElementById('pf-photo-size').textContent = '-';
         }
 
-        function loadImageFromFile(file) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    const img = new Image();
-                    img.onload = () => resolve(img);
-                    img.onerror = reject;
-                    img.src = reader.result;
-                };
-                reader.onerror = reject;
-                reader.readAsDataURL(file);
-            });
-        }
-
-        // Draws the image onto a canvas, cropped to a square using the given
-        // source rectangle (sx, sy, side — all in source-image pixels), at
-        // the given max output dimension, and returns a JPEG data URL at the
-        // given quality (0-1). Cropping to a square here — instead of just
-        // resizing while keeping the original aspect ratio — matches how
-        // the photo is displayed everywhere in the storefront (all image
-        // slots use object-fit:cover on square/near-square boxes), so what
-        // gets stored is exactly what gets shown, with no surprise cropping
-        // happening later in different spots depending on each photo's
-        // original proportions. The crop rectangle itself now comes from
-        // the crop modal (user-chosen pan/zoom) instead of always being the
-        // auto-centered square.
-        function canvasToJpeg(canvasOrImg, maxDim, quality, cropRect) {
-            // Accepts either a source <img> (draws + resizes it onto a fresh
-            // canvas) or an existing canvas (just re-encodes it at a new
-            // quality — used by the fast path below to avoid redrawing the
-            // image on every quality attempt).
-            if (canvasOrImg instanceof HTMLCanvasElement) {
-                return canvasOrImg.toDataURL('image/jpeg', quality);
-            }
-
-            const img = canvasOrImg;
-            const { width: srcW, height: srcH } = img;
-            let side, sx, sy;
-            if (cropRect) {
-                ({ side, sx, sy } = cropRect);
-            } else {
-                side = Math.min(srcW, srcH);
-                sx = Math.round((srcW - side) / 2);
-                sy = Math.round((srcH - side) / 2);
-            }
-
-            const outSize = Math.min(maxDim, Math.round(side));
-            const canvas = document.createElement('canvas');
-            canvas.width = outSize;
-            canvas.height = outSize;
-            const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#ffffff'; // avoid black background on transparent PNGs
-            ctx.fillRect(0, 0, outSize, outSize);
-            ctx.drawImage(img, sx, sy, side, side, 0, 0, outSize, outSize);
-            return canvas.toDataURL('image/jpeg', quality);
-        }
-
-        function dataUrlSizeBytes(dataUrl) {
-            const base64 = dataUrl.split(',')[1] || '';
-            return Math.round((base64.length * 3) / 4);
-        }
-
-        // Builds the resized canvas ONCE for a given maxDim, then only
-        // re-encodes (toDataURL) at different quality levels on that same
-        // canvas. drawImage (resizing the source photo) is the expensive
-        // step — a phone photo can be 4000px+ per side — so redoing it on
-        // every quality attempt (the old behavior) is what made compression
-        // freeze the tab for a long time on large uploads. Re-encoding an
-        // already-sized canvas at a new quality is comparatively cheap.
-        function buildResizedCanvas(img, maxDim, cropRect) {
-            const { width: srcW, height: srcH } = img;
-            let side, sx, sy;
-            if (cropRect) {
-                ({ side, sx, sy } = cropRect);
-            } else {
-                side = Math.min(srcW, srcH);
-                sx = Math.round((srcW - side) / 2);
-                sy = Math.round((srcH - side) / 2);
-            }
-            const outSize = Math.min(maxDim, Math.round(side));
-            const canvas = document.createElement('canvas');
-            canvas.width = outSize;
-            canvas.height = outSize;
-            const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, outSize, outSize);
-            ctx.drawImage(img, sx, sy, side, side, 0, 0, outSize, outSize);
-            return canvas;
-        }
-
-        // Iteratively reduces quality, then dimensions, until the encoded
-        // JPEG is at or below the target size. Starts at a large dimension and
-        // high quality, only stepping down as far as needed — Firestore's real
-        // limit is 1 MiB per document, so targets well under that (e.g. 150-300KB)
-        // still leave a lot more headroom than the old ~5KB target, which forced
-        // the image down to ~100px/10% quality and looked heavily degraded.
-        //
-        // Performance: the source image is resized onto a canvas only ONCE
-        // per dimension step (buildResizedCanvas), then re-encoded at a
-        // handful of quality levels on that same canvas. This keeps the
-        // whole pass fast even for large phone photos, instead of redrawing
-        // the full-resolution source image on every quality attempt.
-        async function compressImageToTarget(img, targetBytes = 200 * 1024, cropRect) {
-            const dims = [1600, 1200, 1000, 800, 600, 400, 300];
-            const qualities = [0.85, 0.7, 0.55, 0.4];
-            let best = null;
-
-            for (const maxDim of dims) {
-                // Yield to the browser before each dimension step (the
-                // expensive drawImage/resize) so the tab can repaint and
-                // process input instead of freezing solid on a large phone
-                // photo. Without this, the whole loop below ran as one
-                // uninterrupted synchronous block, which could look like a
-                // silent failure on big source images (toast appears, then
-                // nothing — the page just never got a chance to update).
-                await new Promise(requestAnimationFrame);
-
-                const canvas = buildResizedCanvas(img, maxDim, cropRect);
-
-                for (const quality of qualities) {
-                    const dataUrl = canvasToJpeg(canvas, maxDim, quality);
-                    const size = dataUrlSizeBytes(dataUrl);
-
-                    if (!best || size < dataUrlSizeBytes(best)) {
-                        best = dataUrl;
-                    }
-                    if (size <= targetBytes) {
-                        return dataUrl;
-                    }
-                }
-            }
-
-            // Could not get under target even at the smallest size/quality;
-            // return the smallest result we found.
-            return best;
-        }
-
-        // ---- Interactive crop modal (pan + zoom over a fixed square frame) ----
-        // Shared by both product photos and team member photos: opens with a
-        // loaded Image, lets the admin drag to pan and use the slider to
-        // zoom, then resolves to a cropRect ({sx, sy, side} in source-image
-        // pixels) that feeds straight into compressImageToTarget/canvasToJpeg
-        // above — so the final square crop is exactly what was framed in
-        // the modal, not an auto-center guess.
-        const cropModalState = {
-            img: null,
-            resolve: null,
-            reject: null,
-            canvas: null,
-            ctx: null,
-            wrapSize: 0,   // on-screen square size (CSS px)
-            minZoomSide: 0, // source-px side length at zoom slider = 100 (fits the smaller image dimension)
-            zoom: 1,        // 1.0 = 100 on the slider
-            offsetX: 0,     // pan offset in source-image pixels (top-left of crop square)
-            offsetY: 0,
-            dragging: false,
-            dragStartX: 0,
-            dragStartY: 0,
-            dragOrigOffsetX: 0,
-            dragOrigOffsetY: 0
-        };
-
-        function openCropModal(img) {
-            return new Promise((resolve, reject) => {
-                cropModalState.img = img;
-                cropModalState.resolve = resolve;
-                cropModalState.reject = reject;
-
-                const overlay = document.getElementById('cropModalOverlay');
-                const wrap = document.getElementById('cropCanvasWrap');
-                const canvas = document.getElementById('cropCanvas');
-                cropModalState.canvas = canvas;
-                cropModalState.ctx = canvas.getContext('2d');
-
-                overlay.classList.add('active');
-
-                // Measure the on-screen square after the modal is visible.
-                requestAnimationFrame(() => {
-                    const rect = wrap.getBoundingClientRect();
-                    const size = Math.round(rect.width);
-                    cropModalState.wrapSize = size;
-                    canvas.width = size;
-                    canvas.height = size;
-
-                    const minSide = Math.min(img.width, img.height);
-                    cropModalState.minZoomSide = minSide;
-                    cropModalState.zoom = 1;
-                    cropModalState.offsetX = Math.round((img.width - minSide) / 2);
-                    cropModalState.offsetY = Math.round((img.height - minSide) / 2);
-
-                    document.getElementById('cropZoomSlider').value = 100;
-                    drawCropCanvas();
-                });
-            });
-        }
-
-        function currentCropSide() {
-            // Side length in source pixels of the square currently framed.
-            // Zoom 100 (slider min) = the full min-dimension square (zoomed
-            // out as far as it goes); higher zoom values shrink the framed
-            // side, i.e. zoom in.
-            return cropModalState.minZoomSide / cropModalState.zoom;
-        }
-
-        function drawCropCanvas() {
-            const { ctx, img, wrapSize } = cropModalState;
-            if (!ctx || !img) return;
-            const side = currentCropSide();
-            ctx.clearRect(0, 0, wrapSize, wrapSize);
-            ctx.drawImage(
-                img,
-                cropModalState.offsetX, cropModalState.offsetY, side, side,
-                0, 0, wrapSize, wrapSize
-            );
-        }
-
-        function clampCropOffsets() {
-            const side = currentCropSide();
-            const maxX = cropModalState.img.width - side;
-            const maxY = cropModalState.img.height - side;
-            cropModalState.offsetX = Math.min(Math.max(cropModalState.offsetX, 0), Math.max(maxX, 0));
-            cropModalState.offsetY = Math.min(Math.max(cropModalState.offsetY, 0), Math.max(maxY, 0));
-        }
-
-        function cropPointerDown(clientX, clientY) {
-            cropModalState.dragging = true;
-            cropModalState.dragStartX = clientX;
-            cropModalState.dragStartY = clientY;
-            cropModalState.dragOrigOffsetX = cropModalState.offsetX;
-            cropModalState.dragOrigOffsetY = cropModalState.offsetY;
-        }
-
-        function cropPointerMove(clientX, clientY) {
-            if (!cropModalState.dragging) return;
-            const side = currentCropSide();
-            // Convert on-screen drag distance to source-image pixels, and
-            // invert it (dragging right reveals content to the left).
-            const scale = side / cropModalState.wrapSize;
-            const dx = (clientX - cropModalState.dragStartX) * scale;
-            const dy = (clientY - cropModalState.dragStartY) * scale;
-            cropModalState.offsetX = cropModalState.dragOrigOffsetX - dx;
-            cropModalState.offsetY = cropModalState.dragOrigOffsetY - dy;
-            clampCropOffsets();
-            drawCropCanvas();
-        }
-
-        function cropPointerUp() {
-            cropModalState.dragging = false;
-        }
-
-        function initCropModalEvents() {
-            const wrap = document.getElementById('cropCanvasWrap');
-            const slider = document.getElementById('cropZoomSlider');
-
-            wrap.addEventListener('mousedown', (e) => cropPointerDown(e.clientX, e.clientY));
-            window.addEventListener('mousemove', (e) => cropPointerMove(e.clientX, e.clientY));
-            window.addEventListener('mouseup', cropPointerUp);
-
-            wrap.addEventListener('touchstart', (e) => {
-                const t = e.touches[0];
-                cropPointerDown(t.clientX, t.clientY);
-            }, { passive: true });
-            wrap.addEventListener('touchmove', (e) => {
-                // Must NOT be passive: without preventDefault() here, the page
-                // scrolls/bounces under the finger while the admin is trying to
-                // pan the crop frame, which on mobile made the crop step feel
-                // broken (image barely moves, page jumps instead) — this is
-                // almost certainly the "upload bug" being reported on phones.
-                e.preventDefault();
-                const t = e.touches[0];
-                cropPointerMove(t.clientX, t.clientY);
-            }, { passive: false });
-            wrap.addEventListener('touchend', cropPointerUp);
-            // A touch can be interrupted (incoming call, notification, OS
-            // gesture) without ever firing touchend — without this, dragging
-            // stays stuck "true" and the next tap anywhere keeps panning the
-            // image unexpectedly.
-            wrap.addEventListener('touchcancel', cropPointerUp);
-
-            slider.addEventListener('input', () => {
-                if (!cropModalState.img) return;
-                // Keep the center of the current crop fixed while zooming,
-                // rather than always zooming from the top-left corner.
-                const oldSide = currentCropSide();
-                const centerX = cropModalState.offsetX + oldSide / 2;
-                const centerY = cropModalState.offsetY + oldSide / 2;
-
-                cropModalState.zoom = Number(slider.value) / 100;
-                const newSide = currentCropSide();
-                cropModalState.offsetX = centerX - newSide / 2;
-                cropModalState.offsetY = centerY - newSide / 2;
-                clampCropOffsets();
-                drawCropCanvas();
-            });
-        }
-
-        function closeCropModal() {
-            document.getElementById('cropModalOverlay').classList.remove('active');
-            cropModalState.img = null;
-            cropModalState.resolve = null;
-            cropModalState.reject = null;
-        }
-
-        function cancelCropModal() {
-            const reject = cropModalState.reject;
-            closeCropModal();
-            if (reject) reject(new Error('crop-cancelled'));
-        }
-
-        function confirmCropModal() {
-            const resolve = cropModalState.resolve;
-            const side = currentCropSide();
-            const cropRect = {
-                sx: Math.round(cropModalState.offsetX),
-                sy: Math.round(cropModalState.offsetY),
-                side: Math.round(side)
-            };
-            closeCropModal();
-            if (resolve) resolve(cropRect);
-        }
-
-        // Wire up drag/zoom listeners once, on load.
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initCropModalEvents);
-        } else {
-            initCropModalEvents();
-        }
+        // Max size for a photo stored inline in the Firestore document.
+        // Firestore's hard limit is 1 MiB per document; this leaves headroom
+        // for the rest of the product's fields (name, price, description...).
+        const MAX_INLINE_PHOTO_BYTES = 900 * 1024;
 
         async function handleProductPhotoSelect(event) {
             const file = event.target.files && event.target.files[0];
@@ -7610,29 +7168,28 @@
                 return;
             }
 
+            // No automatic cropping or compression: the admin is expected to
+            // send an already-reasonably-sized photo. We still guard against
+            // a huge file, since Firestore would otherwise reject the write
+            // (or the write could silently fail) once the field is too big.
+            if (file.size > MAX_INLINE_PHOTO_BYTES) {
+                showToast(`Cette photo est trop lourde (${Math.round(file.size / 1024)} Ko). Merci de la compresser avant de l'envoyer (max ~${Math.round(MAX_INLINE_PHOTO_BYTES / 1024)} Ko).`);
+                event.target.value = '';
+                return;
+            }
+
             try {
-                const img = await loadImageFromFile(file);
-                const cropRect = await openCropModal(img);
+                const reader = new FileReader();
+                const dataUrl = await new Promise((resolve, reject) => {
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = () => reject(reader.error);
+                    reader.readAsDataURL(file);
+                });
 
-                // compressImageToTarget can take a moment on a large source
-                // photo, so show visible progress first — otherwise the
-                // admin has no feedback while it runs and it can look like
-                // the click did nothing. The function itself now yields
-                // between steps (see its definition) instead of running as
-                // one long blocking call, so the toast/preview reliably show
-                // up even on big phone photos.
-                showToast('Compression de la photo...');
-                await new Promise(requestAnimationFrame); // let the toast paint before the heavy work
-
-                const compressed = await compressImageToTarget(img, 200 * 1024, cropRect);
-                document.getElementById('pf-image').value = compressed;
-                showProductPhotoPreview(compressed);
+                document.getElementById('pf-image').value = dataUrl;
+                showProductPhotoPreview(dataUrl);
             } catch (err) {
-                if (err && err.message === 'crop-cancelled') {
-                    event.target.value = '';
-                    return;
-                }
-                console.error('Erreur compression photo:', err);
+                console.error('Erreur lecture photo:', err);
                 showToast('Impossible de traiter cette image');
             }
         }
