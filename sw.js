@@ -2,7 +2,7 @@
 // Cache-first for the app shell, so the site opens instantly offline.
 // Firestore itself handles its own offline sync via IndexedDB (enabled in the app).
 
-const CACHE_NAME = 'koman-gs-v1';
+const CACHE_NAME = 'koman-gs-v2';
 const APP_SHELL = [
     './',
     './index.html',
